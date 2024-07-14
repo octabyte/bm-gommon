@@ -1,7 +1,9 @@
 package context
 
-import "github.com/labstack/echo/v4"
+import (
+	"golang.org/x/net/context"
+)
 
-func GetSessionFromContext(c echo.Context) string {
-	return c.Get("requestSession").(string)
+func GetSessionFromContext(ctx context.Context) string {
+	return ctx.Value("requestSession").(string)
 }

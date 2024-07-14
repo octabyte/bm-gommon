@@ -1,7 +1,9 @@
 package context
 
-import "github.com/labstack/echo/v4"
+import (
+	"context"
+)
 
-func GetTokenFromContext(c echo.Context) string {
-	return c.Get("requestToken").(string)
+func GetTokenFromContext(ctx context.Context) string {
+	return ctx.Value("requestToken").(string)
 }
