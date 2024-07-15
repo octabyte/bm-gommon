@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"github.com/labstack/echo/v4"
 	"log"
@@ -28,7 +29,8 @@ func SetTokenInContext() echo.MiddlewareFunc {
 				token = cookie.Value
 			}
 
-			c.Set(TokenKey, token)
+			newContext := context.WithValue(c.Request().Context(), TokenKey, token)
+			c.SetRequest(c.Request().WithContext(newContext))
 			return next(c)
 		}
 	}

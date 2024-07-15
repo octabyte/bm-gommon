@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"github.com/labstack/echo/v4"
+	"golang.org/x/net/context"
 	"log"
 )
 
@@ -30,8 +31,8 @@ func SetSessionInContext() echo.MiddlewareFunc {
 				session = cookie.Value
 			}
 
-			// Set the session in the context
-			c.Set(RequestSessionKey, session)
+			newContext := context.WithValue(c.Request().Context(), RequestSessionKey, session)
+			c.SetRequest(c.Request().WithContext(newContext))
 			return next(c)
 		}
 	}
