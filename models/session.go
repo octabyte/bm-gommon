@@ -8,3 +8,7 @@ type Session struct {
 	Token                string `json:"token"`
 	RefreshToken         string `json:"refresh_token"`
 }
+
+type JWTClaims struct {
+	User User `json:"user"`
+}

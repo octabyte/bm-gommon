@@ -6,5 +6,9 @@ import (
 )
 
 func GetSessionFromContext(ctx context.Context) models.Session {
-	return ctx.Value("requestSession").(models.Session)
+	return ctx.Value("jwtSession").(models.Session)
+}
+
+func GetUserFromContext(ctx context.Context) models.User {
+	return GetSessionFromContext(ctx).User
 }
