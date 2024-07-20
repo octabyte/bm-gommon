@@ -8,11 +8,6 @@ import (
 	"net/http"
 )
 
-const (
-	TokenKey      = "requestToken"
-	Authorization = "Authorization"
-)
-
 func SetTokenInContext() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {

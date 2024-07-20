@@ -6,11 +6,6 @@ import (
 	"log"
 )
 
-const (
-	SessionHeader     = "Session"
-	RequestSessionKey = "requestSession"
-)
-
 func SetSessionInContext() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
