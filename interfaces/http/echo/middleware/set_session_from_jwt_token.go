@@ -47,7 +47,7 @@ func SetSessionFromJWTToken() echo.MiddlewareFunc {
 				return next(c)
 			}
 
-			newContext := context.WithValue(c.Request().Context(), JWTSessionKey, claims)
+			newContext := context.WithValue(c.Request().Context(), JWTSessionKey, claims["user"])
 			c.SetRequest(c.Request().WithContext(newContext))
 			return next(c)
 		}
