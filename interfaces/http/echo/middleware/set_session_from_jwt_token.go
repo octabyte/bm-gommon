@@ -2,9 +2,11 @@ package middleware
 
 import (
 	"encoding/base64"
-	"encoding/json"
+	"github.com/goccy/go-json"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/gommon/log"
+	"github.com/octabyte/bm-gommon/models"
+	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 	"strings"
 )
@@ -40,14 +42,16 @@ func SetSessionFromJWTToken() echo.MiddlewareFunc {
 				return next(c)
 			}
 
+			userString := gjson.GetBytes(payload, "user").String()
+
 			// Parse the JSON payload
-			var claims map[string]interface{}
-			err = json.Unmarshal(payload, &claims)
+			var user models.User
+			err = json.Unmarshal([]byte(userString), &user)
 			if err != nil {
 				return next(c)
 			}
 
-			newContext := context.WithValue(c.Request().Context(), JWTSessionKey, claims["user"])
+			newContext := context.WithValue(c.Request().Context(), JWTSessionKey, user)
 			c.SetRequest(c.Request().WithContext(newContext))
 			return next(c)
 		}
