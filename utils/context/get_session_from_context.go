@@ -10,5 +10,5 @@ func GetSessionFromContext(ctx context.Context) models.Session {
 }
 
 func GetUserFromContext(ctx context.Context) models.User {
-	return GetSessionFromContext(ctx).User
+	return ctx.Value("jwtSession").(models.User)
 }
