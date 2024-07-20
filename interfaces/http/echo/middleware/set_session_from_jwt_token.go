@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/gommon/log"
+	"golang.org/x/net/context"
 	"strings"
 )
 
@@ -46,9 +47,8 @@ func SetSessionFromJWTToken() echo.MiddlewareFunc {
 				return next(c)
 			}
 
-			// Set the claims in the context
-			c.Set(JWTSessionKey, claims)
-
+			newContext := context.WithValue(c.Request().Context(), JWTSessionKey, claims)
+			c.SetRequest(c.Request().WithContext(newContext))
 			return next(c)
 		}
 	}
