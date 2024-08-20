@@ -7,8 +7,8 @@ import (
 )
 
 // Set sets a key-value pair in Redis.
-func Set(ctx context.Context, client *redis.Client, key string, value interface{}) error {
-	return client.Set(ctx, key, value, 0).Err()
+func Set(ctx context.Context, client *redis.Client, key string, value interface{}, ttl time.Duration) error {
+	return client.Set(ctx, key, value, ttl).Err()
 }
 
 // Get retrieves the value of a key from Redis.
