@@ -31,6 +31,7 @@ func Init(level string) {
 		},
 	}
 	zap.ReplaceGlobals(zap.Must(config.Build()))
+	zap.AddCallerSkip(1)
 }
 
 func LogDebug(msg string, fields ...zap.Field) {
