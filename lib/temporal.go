@@ -1,14 +1,12 @@
 package lib
 
 import (
-	"fmt"
 	"github.com/go-playground/validator/v10"
 	"go.temporal.io/sdk/client"
 )
 
 type TemporalClientConfig struct {
-	Host      string `validate:"required"`
-	Port      int    `validate:"required"`
+	HostPort  string `validate:"required"`
 	Namespace string
 }
 
@@ -22,7 +20,7 @@ func NewTemporalClient(cfg *TemporalClientConfig) (client.Client, error) {
 	}
 
 	temporalClient, err := client.Dial(client.Options{
-		HostPort: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		HostPort: cfg.HostPort,
 	})
 	if err != nil {
 		return nil, err
