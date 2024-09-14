@@ -7,13 +7,19 @@ import (
 	"os"
 )
 
-func Init(level string) {
+type Config struct {
+	Level       string
+	Env         string
+	ServiceName string
+}
+
+func Init(cfg *Config) {
 	encoderCfg := zap.NewProductionEncoderConfig()
 	encoderCfg.TimeKey = "timestamp"
 	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
 
 	config := zap.Config{
-		Level:             zap.NewAtomicLevelAt(getLogLevelFromString(level)),
+		Level:             zap.NewAtomicLevelAt(getLogLevelFromString(cfg.Level)),
 		Development:       false,
 		DisableCaller:     false,
 		DisableStacktrace: false,
@@ -27,11 +33,19 @@ func Init(level string) {
 			"stderr",
 		},
 		InitialFields: map[string]interface{}{
-			"pid": os.Getpid(),
+			"pid":     os.Getpid(),
+			"env":     cfg.Env,
+			"service": cfg.ServiceName,
 		},
 	}
-	zap.ReplaceGlobals(zap.Must(config.Build()))
-	zap.AddCallerSkip(1)
+
+	logger, err := config.Build()
+	if err != nil {
+		panic(err)
+	}
+	logger = logger.WithOptions(zap.AddCallerSkip(1))
+
+	zap.ReplaceGlobals(zap.Must(logger, err))
 }
 
 func LogDebug(msg string, fields ...zap.Field) {
