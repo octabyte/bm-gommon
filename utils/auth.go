@@ -7,8 +7,9 @@ import (
 )
 
 type Config struct {
-	Host  string
-	Store string
+	Host     string
+	Store    string
+	ApiToken string
 }
 
 func GetNewestAuthorizationModelID(config *Config) (string, error) {
@@ -23,6 +24,7 @@ func GetNewestAuthorizationModelID(config *Config) (string, error) {
 		SetQueryParams(map[string]string{
 			"page_size": "1",
 		}).
+		SetHeader("Authorization", fmt.Sprintf("Bearer %s", config.ApiToken)).
 		Get(fmt.Sprintf("/stores/%s/authorization-models", config.Store))
 	if err != nil {
 		return "", err
