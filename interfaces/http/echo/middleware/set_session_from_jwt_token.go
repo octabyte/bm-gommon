@@ -19,10 +19,12 @@ func SetSessionFromJWTToken() echo.MiddlewareFunc {
 
 			// If not present, attempt to get it from the cookie
 			if JWTToken == "" {
+				log.Info("JWTToken is empty. Authorization header is empty")
+
 				cookie, err := c.Cookie(SessionHeader)
 				if err != nil {
 					if err.Error() != "http: named cookie not present" {
-						log.Errorf("Error retrieving session cookie: %v", err)
+						log.Info("No cookie found")
 					}
 					// Proceed to the next middleware if the cookie is not present or an error occurred
 					return next(c)
