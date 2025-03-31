@@ -9,6 +9,7 @@ import (
 
 type QueueConfig struct {
 	Name              string
+	Type              QueueType
 	Durable           bool
 	AutoDelete        bool
 	Exclusive         bool
@@ -17,10 +18,14 @@ type QueueConfig struct {
 	TTL               time.Duration
 	MaxLength         int
 	DeadLetterEnabled bool
-	DeadLetterSuffix  string // e.g., ".dlq"
+	DeadLetterSuffix  string
 }
 
 func (r *RabbitMQ) DeclareQueue(cfg QueueConfig) (amqp.Queue, error) {
+	if cfg.Type != "" {
+		cfg.Args["x-queue-type"] = string(cfg.Type)
+	}
+
 	if cfg.Args == nil {
 		cfg.Args = amqp.Table{}
 	}
