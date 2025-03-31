@@ -1,47 +1,63 @@
 package queue
 
 import (
+	"fmt"
+	"time"
+
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-type Connection struct {
-	Conn *amqp.Connection
-	Ch   *amqp.Channel
+type QueueConfig struct {
+	Name              string
+	Durable           bool
+	AutoDelete        bool
+	Exclusive         bool
+	NoWait            bool
+	Args              amqp.Table
+	TTL               time.Duration
+	MaxLength         int
+	DeadLetterEnabled bool
+	DeadLetterSuffix  string // e.g., ".dlq"
 }
 
-// NewConnection creates a new AMQP connection using the provided configuration.
-func NewConnection(config ConnectionConfig) (*Connection, error) {
-	// Establish a connection to the AMQP server
-	conn, err := amqp.Dial(config.URI)
-	if err != nil {
-		return nil, err
+func (r *RabbitMQ) DeclareQueue(cfg QueueConfig) (amqp.Queue, error) {
+	if cfg.Args == nil {
+		cfg.Args = amqp.Table{}
 	}
 
-	// Open a new channel over the connection
-	ch, err := conn.Channel()
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
+	if cfg.TTL > 0 {
+		cfg.Args["x-message-ttl"] = int32(cfg.TTL.Milliseconds())
 	}
 
-	// Declare a new queue on the channel
-	queueConfig := config.QueueConfig
-	if _, err = ch.QueueDeclare(
-		queueConfig.Name,
-		queueConfig.Durable,
-		queueConfig.AutoDelete,
-		queueConfig.Exclusive,
-		queueConfig.NoWait,
-		queueConfig.Args,
-	); err != nil {
-		_ = conn.Close()
-		return nil, err
+	if cfg.MaxLength > 0 {
+		cfg.Args["x-max-length"] = cfg.MaxLength
 	}
 
-	// Return the established connection and channel
-	return &Connection{conn, ch}, nil
-}
+	if cfg.DeadLetterEnabled {
+		dlqName := cfg.Name + cfg.DeadLetterSuffix
+		cfg.Args["x-dead-letter-exchange"] = ""
+		cfg.Args["x-dead-letter-routing-key"] = dlqName
 
-func (c *Connection) Close() error {
-	return c.Conn.Close()
+		// Ensure DLQ exists
+		_, err := r.channel.QueueDeclare(
+			dlqName,
+			true,  // durable
+			false, // auto-delete
+			false, // exclusive
+			false, // no-wait
+			nil,
+		)
+		if err != nil {
+			return amqp.Queue{}, fmt.Errorf("failed to declare DLQ: %w", err)
+		}
+	}
+
+	return r.channel.QueueDeclare(
+		cfg.Name,
+		cfg.Durable,
+		cfg.AutoDelete,
+		cfg.Exclusive,
+		cfg.NoWait,
+		cfg.Args,
+	)
 }
