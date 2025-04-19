@@ -2,13 +2,15 @@ package utils
 
 import (
 	"fmt"
+
 	"github.com/go-resty/resty/v2"
 	"github.com/tidwall/gjson"
 )
 
 type Config struct {
-	Host  string
-	Store string
+	Host     string
+	Store    string
+	ApiToken string
 }
 
 func GetNewestAuthorizationModelID(config *Config) (string, error) {
@@ -23,6 +25,7 @@ func GetNewestAuthorizationModelID(config *Config) (string, error) {
 		SetQueryParams(map[string]string{
 			"page_size": "1",
 		}).
+		SetHeader("Authorization", fmt.Sprintf("Bearer %s", config.ApiToken)).
 		Get(fmt.Sprintf("/stores/%s/authorization-models", config.Store))
 	if err != nil {
 		return "", err
