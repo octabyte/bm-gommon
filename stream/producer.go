@@ -63,13 +63,14 @@ func ProduceEventAsync(producer *stream.Producer, event *Event) <-chan error {
 type ProducerConfig struct {
 	ProducerName string
 	StreamName   string
+	Compression  stream.Compression
 }
 
 func CreateProducer(environment *stream.Environment, producerConfig ProducerConfig) (*stream.Producer, error) {
 	producer, err := environment.NewProducer(producerConfig.StreamName,
 		stream.NewProducerOptions().
 			SetProducerName(producerConfig.ProducerName).
-			SetCompression(stream.Compression{}.Gzip()),
+			SetCompression(producerConfig.Compression),
 	)
 	if err != nil {
 		return nil, err
