@@ -11,6 +11,7 @@ type EnvironmentConfig struct {
 	Port     int
 	User     string
 	Password string
+	Url      string
 }
 
 func NewEnvironment(environmentConfig EnvironmentConfig) (*stream.Environment, error) {
@@ -20,6 +21,16 @@ func NewEnvironment(environmentConfig EnvironmentConfig) (*stream.Environment, e
 
 	if environmentConfig.Port == 0 {
 		return nil, errors.New("port is required")
+	}
+
+	if environmentConfig.Url != "" {
+		env, err := stream.NewEnvironment(
+			stream.NewEnvironmentOptions().
+				SetUri(environmentConfig.Url))
+		if err != nil {
+			return nil, err
+		}
+		return env, nil
 	}
 
 	env, err := stream.NewEnvironment(

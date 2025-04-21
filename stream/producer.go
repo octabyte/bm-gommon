@@ -67,11 +67,17 @@ type ProducerConfig struct {
 }
 
 func CreateProducer(environment *stream.Environment, producerConfig ProducerConfig) (*stream.Producer, error) {
-	producer, err := environment.NewProducer(producerConfig.StreamName,
-		stream.NewProducerOptions().
-			SetProducerName(producerConfig.ProducerName).
-			SetCompression(producerConfig.Compression),
-	)
+	producerOptions := stream.NewProducerOptions()
+
+	if producerConfig.Compression != (stream.Compression{}) {
+		producerOptions.SetCompression(producerConfig.Compression)
+	}
+
+	if producerConfig.ProducerName != "" {
+		producerOptions.SetProducerName(producerConfig.ProducerName)
+	}
+
+	producer, err := environment.NewProducer(producerConfig.StreamName, producerOptions)
 	if err != nil {
 		return nil, err
 	}
