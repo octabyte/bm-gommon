@@ -15,14 +15,6 @@ type EnvironmentConfig struct {
 }
 
 func NewEnvironment(environmentConfig EnvironmentConfig) (*stream.Environment, error) {
-	if environmentConfig.Host == "" {
-		return nil, errors.New("host is required")
-	}
-
-	if environmentConfig.Port == 0 {
-		return nil, errors.New("port is required")
-	}
-
 	if environmentConfig.Url != "" {
 		env, err := stream.NewEnvironment(
 			stream.NewEnvironmentOptions().
@@ -31,6 +23,14 @@ func NewEnvironment(environmentConfig EnvironmentConfig) (*stream.Environment, e
 			return nil, err
 		}
 		return env, nil
+	}
+
+	if environmentConfig.Host == "" {
+		return nil, errors.New("host is required")
+	}
+
+	if environmentConfig.Port == 0 {
+		return nil, errors.New("port is required")
 	}
 
 	env, err := stream.NewEnvironment(
