@@ -126,8 +126,7 @@ func (e *Exchange) CreateQueue(queueConfig QueueConfig, bindingConfig BindingCon
 }
 
 // Publish sends a message to the exchange
-func (e *Exchange) Publish(routingKey string, message []byte) error {
-	ctx := context.Background()
+func (e *Exchange) Publish(ctx context.Context, routingKey string, message []byte) error {
 	return e.channel.PublishWithContext(
 		ctx,
 		e.config.Name, // exchange
