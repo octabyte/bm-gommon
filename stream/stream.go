@@ -42,16 +42,17 @@ type Producer struct {
 
 // Consumer represents a message consumer with its own channel
 type Consumer struct {
-	channel     *amqp.Channel
-	queueName   string
-	handler     func([]byte) error
-	autoAck     bool
-	exclusive   bool
-	noLocal     bool
-	noWait      bool
-	args        amqp.Table
-	consumerTag string
-	mu          sync.RWMutex
+	channel       *amqp.Channel
+	queueName     string
+	handler       func([]byte) error
+	autoAck       bool
+	exclusive     bool
+	noLocal       bool
+	noWait        bool
+	args          amqp.Table
+	consumerTag   string
+	mu            sync.RWMutex
+	prefetchCount int
 }
 
 // StreamConfig holds configuration for the Stream
@@ -456,6 +457,13 @@ func WithArgs(args amqp.Table) ConsumerOption {
 func WithConsumerTag(tag string) ConsumerOption {
 	return func(c *Consumer) {
 		c.consumerTag = tag
+	}
+}
+
+// WithPrefetchCount sets the prefetch count for the consumer
+func WithPrefetchCount(count int) ConsumerOption {
+	return func(c *Consumer) {
+		c.prefetchCount = count
 	}
 }
 
