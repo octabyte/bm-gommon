@@ -476,6 +476,13 @@ func (c *Consumer) Start(ctx context.Context) error {
 		return errors.New("consumer channel is not initialized")
 	}
 
+	// Set prefetch count if specified
+	if c.prefetchCount > 0 {
+		if err := c.channel.Qos(c.prefetchCount, 0, false); err != nil {
+			return fmt.Errorf("failed to set prefetch count: %w", err)
+		}
+	}
+
 	msgs, err := c.channel.Consume(
 		c.queueName,
 		c.consumerTag, // Use the configured consumer tag
