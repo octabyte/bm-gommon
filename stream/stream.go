@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"sync"
 	"time"
@@ -21,13 +22,27 @@ type StreamQueueConfig struct {
 // Stream represents the AMQP connection and channel management
 type Stream struct {
 	conn           *amqp.Connection
+	channel        *amqp.Channel
 	url            string
 	reconnectDelay time.Duration
 	maxRetries     int
-	mu             sync.RWMutex
-	notifyClose    chan *amqp.Error
-	producers      map[string]*Producer
-	consumers      map[string]*Consumer
+
+	// Connection management
+	mu           sync.RWMutex
+	connected    bool
+	reconnecting bool
+	connClosed   chan *amqp.Error
+	chanClosed   chan *amqp.Error
+
+	// Producer and consumer management
+	producers  map[string]*Producer
+	consumers  map[string]*Consumer
+	producerMu sync.RWMutex
+	consumerMu sync.RWMutex
+
+	// Stream queues to recreate after reconnection
+	streamQueues  map[string]StreamQueueConfig
+	streamQueueMu sync.RWMutex
 }
 
 // Producer represents a message producer with its own channel
@@ -38,6 +53,7 @@ type Producer struct {
 	closed        bool
 	streamName    string
 	id            string // Optional identifier for logging/monitoring
+	active        bool
 }
 
 // Consumer represents a message consumer with its own channel
@@ -53,6 +69,8 @@ type Consumer struct {
 	consumerTag   string
 	mu            sync.RWMutex
 	prefetchCount int
+	active        bool
+	stopCh        chan struct{}
 }
 
 // StreamConfig holds configuration for the Stream
@@ -80,21 +98,24 @@ func NewStream(config StreamConfig) (*Stream, error) {
 	}
 
 	if config.MaxRetries == 0 {
-		config.MaxRetries = 3
+		config.MaxRetries = 10
 	}
 
 	stream := &Stream{
 		url:            config.URL,
 		reconnectDelay: config.ReconnectDelay,
 		maxRetries:     config.MaxRetries,
-		notifyClose:    make(chan *amqp.Error),
 		producers:      make(map[string]*Producer),
 		consumers:      make(map[string]*Consumer),
+		streamQueues:   make(map[string]StreamQueueConfig),
 	}
 
 	if err := stream.connect(); err != nil {
 		return nil, err
 	}
+
+	// Start connection monitoring
+	go stream.monitorConnection()
 
 	return stream, nil
 }
@@ -128,11 +149,12 @@ func (s *Stream) DeclareStreamQueue(queueName string, config StreamQueueConfig) 
 		return fmt.Errorf("invalid max age format: %w", err)
 	}
 
-	channel, err := s.conn.Channel()
-	if err != nil {
-		return fmt.Errorf("failed to create channel for queue declaration: %w", err)
+	if err := s.waitForConnection(); err != nil {
+		return fmt.Errorf("connection not ready: %w", err)
 	}
-	defer channel.Close()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	args := make(amqp.Table)
 	args["x-queue-type"] = "stream" // Always set stream type
@@ -145,7 +167,7 @@ func (s *Stream) DeclareStreamQueue(queueName string, config StreamQueueConfig) 
 		args["x-max-age"] = config.MaxAge
 	}
 
-	_, err = channel.QueueDeclare(
+	_, err := s.channel.QueueDeclare(
 		queueName, // name
 		true,      // durable
 		false,     // delete when unused
@@ -157,11 +179,19 @@ func (s *Stream) DeclareStreamQueue(queueName string, config StreamQueueConfig) 
 		return fmt.Errorf("failed to declare stream queue: %w", err)
 	}
 
+	// Store stream queue config for recreation after reconnection
+	s.streamQueueMu.Lock()
+	s.streamQueues[queueName] = config
+	s.streamQueueMu.Unlock()
+
 	return nil
 }
 
 // connect establishes the AMQP connection
 func (s *Stream) connect() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var err error
 
 	// Connect to RabbitMQ
@@ -170,74 +200,245 @@ func (s *Stream) connect() error {
 		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
 	}
 
-	s.notifyClose = s.conn.NotifyClose(make(chan *amqp.Error))
+	// Create main channel for queue declarations
+	s.channel, err = s.conn.Channel()
+	if err != nil {
+		s.conn.Close()
+		return fmt.Errorf("failed to create main channel: %w", err)
+	}
 
-	// Start reconnection handler
-	go s.handleReconnect()
+	s.connected = true
+	s.connClosed = make(chan *amqp.Error, 1)
+	s.chanClosed = make(chan *amqp.Error, 1)
 
+	// Listen for connection/channel close events
+	s.conn.NotifyClose(s.connClosed)
+	s.channel.NotifyClose(s.chanClosed)
+
+	// Recreate stream queues and restart producers/consumers after reconnection
+	s.recreateStreamQueues()
+	s.recreateProducers()
+	s.restartConsumers()
+
+	log.Printf("Connected to RabbitMQ for streams")
 	return nil
 }
 
-// handleReconnect manages reconnection logic
-func (s *Stream) handleReconnect() {
-	for err := range s.notifyClose {
-		if err != nil {
-			fmt.Printf("Connection closed: %v\n", err)
-			retries := 0
-			for retries < s.maxRetries {
-				if err := s.reconnect(); err != nil {
-					retries++
-					time.Sleep(s.reconnectDelay)
-					continue
-				}
-				break
+// monitorConnection monitors connection health and handles reconnection
+func (s *Stream) monitorConnection() {
+	for {
+		select {
+		case err := <-s.connClosed:
+			if err != nil {
+				log.Printf("RabbitMQ connection closed: %v", err)
+				s.handleDisconnection()
+			}
+		case err := <-s.chanClosed:
+			if err != nil {
+				log.Printf("RabbitMQ channel closed: %v", err)
+				s.handleDisconnection()
 			}
 		}
 	}
 }
 
-// reconnect re-establishes the connection and recreates all channels
-func (s *Stream) reconnect() error {
+// handleDisconnection handles connection loss and triggers reconnection
+func (s *Stream) handleDisconnection() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.reconnecting {
+		s.mu.Unlock()
+		return
+	}
+	s.connected = false
+	s.reconnecting = true
+	s.mu.Unlock()
 
-	if err := s.connect(); err != nil {
-		return err
+	// Stop all consumers and mark producers as inactive
+	s.stopAllConsumers()
+	s.deactivateAllProducers()
+
+	// Attempt reconnection with exponential backoff
+	for attempt := 1; attempt <= s.maxRetries; attempt++ {
+		log.Printf("Attempting to reconnect to RabbitMQ (attempt %d)", attempt)
+
+		if err := s.connect(); err != nil {
+			delay := time.Duration(attempt) * s.reconnectDelay
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			log.Printf("Reconnection failed, retrying in %v: %v", delay, err)
+			time.Sleep(delay)
+			continue
+		}
+
+		s.mu.Lock()
+		s.reconnecting = false
+		s.mu.Unlock()
+		log.Printf("Successfully reconnected to RabbitMQ")
+		return
 	}
 
-	// Recreate all producer channels
+	log.Printf("Failed to reconnect after %d attempts, giving up", s.maxRetries)
+	s.mu.Lock()
+	s.reconnecting = false
+	s.mu.Unlock()
+}
+
+// recreateStreamQueues recreates all previously declared stream queues
+func (s *Stream) recreateStreamQueues() {
+	s.streamQueueMu.RLock()
+	defer s.streamQueueMu.RUnlock()
+
+	for queueName, config := range s.streamQueues {
+		args := make(amqp.Table)
+		args["x-queue-type"] = "stream"
+
+		if config.MaxLengthBytes > 0 {
+			args["x-max-length-bytes"] = config.MaxLengthBytes
+		}
+
+		if config.MaxAge != "" {
+			args["x-max-age"] = config.MaxAge
+		}
+
+		_, err := s.channel.QueueDeclare(
+			queueName,
+			true,
+			false,
+			false,
+			false,
+			args,
+		)
+		if err != nil {
+			log.Printf("Failed to recreate stream queue %s: %v", queueName, err)
+		}
+	}
+}
+
+// recreateProducers recreates all producer channels
+func (s *Stream) recreateProducers() {
+	s.producerMu.Lock()
+	defer s.producerMu.Unlock()
+
 	for id, producer := range s.producers {
 		channel, err := s.conn.Channel()
 		if err != nil {
-			return fmt.Errorf("failed to recreate producer channel %s: %w", id, err)
+			log.Printf("Failed to recreate producer channel %s: %v", id, err)
+			continue
 		}
+
 		if err := channel.Confirm(false); err != nil {
-			return fmt.Errorf("failed to enable publisher confirms for producer %s: %w", id, err)
+			log.Printf("Failed to enable publisher confirms for producer %s: %v", id, err)
+			channel.Close()
+			continue
+		}
+
+		producer.mu.Lock()
+		if producer.channel != nil {
+			producer.channel.Close()
 		}
 		producer.channel = channel
 		producer.notifyConfirm = channel.NotifyPublish(make(chan amqp.Confirmation, 1))
+		producer.active = true
+		producer.closed = false
+		producer.mu.Unlock()
 	}
+}
 
-	// Recreate all consumer channels
+// stopAllConsumers stops all active consumers
+func (s *Stream) stopAllConsumers() {
+	s.consumerMu.Lock()
+	defer s.consumerMu.Unlock()
+
+	for _, consumer := range s.consumers {
+		consumer.mu.Lock()
+		if consumer.active {
+			close(consumer.stopCh)
+			consumer.active = false
+		}
+		consumer.stopCh = make(chan struct{})
+		consumer.mu.Unlock()
+	}
+}
+
+// deactivateAllProducers marks all producers as inactive
+func (s *Stream) deactivateAllProducers() {
+	s.producerMu.RLock()
+	defer s.producerMu.RUnlock()
+
+	for _, producer := range s.producers {
+		producer.mu.Lock()
+		producer.active = false
+		producer.mu.Unlock()
+	}
+}
+
+// restartConsumers restarts all consumers after reconnection
+func (s *Stream) restartConsumers() {
+	s.consumerMu.RLock()
+	defer s.consumerMu.RUnlock()
+
 	for id, consumer := range s.consumers {
-		channel, err := s.conn.Channel()
-		if err != nil {
-			return fmt.Errorf("failed to recreate consumer channel %s: %w", id, err)
-		}
-		consumer.channel = channel
-		if err := consumer.Start(context.Background()); err != nil {
-			return fmt.Errorf("failed to restart consumer %s: %w", id, err)
+		consumer.mu.Lock()
+		if !consumer.active {
+			// Create new channel for consumer
+			channel, err := s.conn.Channel()
+			if err != nil {
+				log.Printf("Failed to recreate consumer channel %s: %v", id, err)
+				consumer.mu.Unlock()
+				continue
+			}
+
+			if consumer.channel != nil {
+				consumer.channel.Close()
+			}
+			consumer.channel = channel
+			consumer.mu.Unlock()
+
+			go s.startConsumer(consumer)
+		} else {
+			consumer.mu.Unlock()
 		}
 	}
+}
 
-	return nil
+// waitForConnection waits for connection to be ready
+func (s *Stream) waitForConnection() error {
+	for i := 0; i < 50; i++ { // Wait up to 5 seconds
+		s.mu.RLock()
+		connected := s.connected && !s.reconnecting
+		s.mu.RUnlock()
+
+		if connected {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("connection not ready after timeout")
+}
+
+// closeConnections safely closes connections
+func (s *Stream) closeConnections() {
+	if s.channel != nil {
+		s.channel.Close()
+		s.channel = nil
+	}
+	if s.conn != nil {
+		s.conn.Close()
+		s.conn = nil
+	}
+	s.connected = false
 }
 
 // NewProducer creates a new producer with its own channel
 // id is optional and used only for logging/monitoring purposes
 func (s *Stream) NewProducer(streamName string, id ...string) (*Producer, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.waitForConnection(); err != nil {
+		return nil, fmt.Errorf("connection not ready: %w", err)
+	}
+
+	s.producerMu.Lock()
+	defer s.producerMu.Unlock()
 
 	// Use stream name as default ID if none provided
 	producerID := streamName
@@ -263,6 +464,7 @@ func (s *Stream) NewProducer(streamName string, id ...string) (*Producer, error)
 		notifyConfirm: channel.NotifyPublish(make(chan amqp.Confirmation, 1)),
 		streamName:    streamName,
 		id:            producerID,
+		active:        true,
 	}
 
 	s.producers[producerID] = producer
@@ -285,6 +487,7 @@ func (p *Producer) Close() error {
 	}
 
 	p.closed = true
+	p.active = false
 	return nil
 }
 
@@ -293,8 +496,8 @@ func (p *Producer) Publish(ctx context.Context, message []byte) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	if p.closed {
-		return errors.New("producer is closed")
+	if p.closed || !p.active {
+		return errors.New("producer is closed or inactive")
 	}
 
 	if p.channel == nil {
@@ -334,8 +537,8 @@ func (p *Producer) PublishEvent(ctx context.Context, event Event) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	if p.closed {
-		return errors.New("producer is closed")
+	if p.closed || !p.active {
+		return errors.New("producer is closed or inactive")
 	}
 
 	if p.channel == nil {
@@ -383,8 +586,12 @@ func (p *Producer) PublishEvent(ctx context.Context, event Event) error {
 
 // NewConsumer creates a new consumer with its own channel
 func (s *Stream) NewConsumer(id, queueName string, handler func([]byte) error, options ...ConsumerOption) (*Consumer, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.waitForConnection(); err != nil {
+		return nil, fmt.Errorf("connection not ready: %w", err)
+	}
+
+	s.consumerMu.Lock()
+	defer s.consumerMu.Unlock()
 
 	if _, exists := s.consumers[id]; exists {
 		return nil, fmt.Errorf("consumer with id %s already exists", id)
@@ -405,6 +612,8 @@ func (s *Stream) NewConsumer(id, queueName string, handler func([]byte) error, o
 		noWait:      false,
 		args:        nil,
 		consumerTag: id, // Use the id as the default consumer tag
+		active:      false,
+		stopCh:      make(chan struct{}),
 	}
 
 	for _, option := range options {
@@ -412,6 +621,10 @@ func (s *Stream) NewConsumer(id, queueName string, handler func([]byte) error, o
 	}
 
 	s.consumers[id] = consumer
+
+	// Start the consumer
+	go s.startConsumer(consumer)
+
 	return consumer, nil
 }
 
@@ -467,57 +680,81 @@ func WithPrefetchCount(count int) ConsumerOption {
 	}
 }
 
-// Start begins consuming messages
-func (c *Consumer) Start(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.channel == nil {
-		return errors.New("consumer channel is not initialized")
+// startConsumer starts a consumer goroutine
+func (s *Stream) startConsumer(consumer *Consumer) {
+	s.mu.RLock()
+	if !s.connected {
+		s.mu.RUnlock()
+		return
 	}
+	s.mu.RUnlock()
+
+	consumer.mu.Lock()
 
 	// Set prefetch count if specified
-	if c.prefetchCount > 0 {
-		if err := c.channel.Qos(c.prefetchCount, 0, false); err != nil {
-			return fmt.Errorf("failed to set prefetch count: %w", err)
+	if consumer.prefetchCount > 0 {
+		if err := consumer.channel.Qos(consumer.prefetchCount, 0, false); err != nil {
+			log.Printf("Failed to set prefetch count for consumer %s: %v", consumer.consumerTag, err)
+			consumer.mu.Unlock()
+			return
 		}
 	}
 
-	msgs, err := c.channel.Consume(
-		c.queueName,
-		c.consumerTag, // Use the configured consumer tag
-		c.autoAck,
-		c.exclusive,
-		c.noLocal,
-		c.noWait,
-		c.args,
+	msgs, err := consumer.channel.Consume(
+		consumer.queueName,
+		consumer.consumerTag,
+		consumer.autoAck,
+		consumer.exclusive,
+		consumer.noLocal,
+		consumer.noWait,
+		consumer.args,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to start consumer: %w", err)
+		log.Printf("Failed to start consumer %s: %v", consumer.consumerTag, err)
+		consumer.mu.Unlock()
+		return
 	}
 
-	go func() {
-		for {
-			select {
-			case msg, ok := <-msgs:
-				if !ok {
-					return
-				}
-				if err := c.handler(msg.Body); err != nil {
-					if !c.autoAck {
-						msg.Nack(false, true)
-					}
-					continue
-				}
-				if !c.autoAck {
-					msg.Ack(false)
-				}
-			case <-ctx.Done():
+	consumer.active = true
+	consumer.mu.Unlock()
+
+	log.Printf("Started consumer for queue: %s", consumer.queueName)
+
+	for {
+		select {
+		case <-consumer.stopCh:
+			log.Printf("Stopping consumer for queue: %s", consumer.queueName)
+			consumer.mu.Lock()
+			consumer.active = false
+			consumer.mu.Unlock()
+			return
+		case msg, ok := <-msgs:
+			if !ok {
+				log.Printf("Consumer channel closed for queue: %s", consumer.queueName)
+				consumer.mu.Lock()
+				consumer.active = false
+				consumer.mu.Unlock()
 				return
 			}
-		}
-	}()
 
+			err := consumer.handler(msg.Body)
+			if err != nil {
+				log.Printf("Error processing message: %v", err)
+				if !consumer.autoAck {
+					msg.Nack(false, false)
+				}
+			} else {
+				if !consumer.autoAck {
+					msg.Ack(false)
+				}
+			}
+		}
+	}
+}
+
+// Start begins consuming messages (deprecated - now automatically started in NewConsumer)
+func (c *Consumer) Start(ctx context.Context) error {
+	// This method is now deprecated as consumers are automatically started
 	return nil
 }
 
@@ -525,6 +762,10 @@ func (c *Consumer) Start(ctx context.Context) error {
 func (c *Consumer) Cancel() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if !c.active {
+		return nil
+	}
 
 	if c.channel == nil {
 		return errors.New("consumer channel is not initialized")
@@ -534,36 +775,43 @@ func (c *Consumer) Cancel() error {
 		return fmt.Errorf("failed to cancel consumer: %w", err)
 	}
 
+	close(c.stopCh)
+	c.active = false
 	return nil
 }
 
 // Close closes the AMQP connection and all channels
 func (s *Stream) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Stop all consumers
+	s.stopAllConsumers()
 
+	s.producerMu.Lock()
 	// Close all producers
 	for id, producer := range s.producers {
 		if err := producer.Close(); err != nil {
-			return fmt.Errorf("failed to close producer %s: %w", id, err)
+			log.Printf("Failed to close producer %s: %v", id, err)
 		}
 	}
+	s.producerMu.Unlock()
 
+	s.consumerMu.Lock()
 	// Close all consumer channels
 	for id, consumer := range s.consumers {
+		consumer.mu.Lock()
 		if consumer.channel != nil {
 			if err := consumer.channel.Close(); err != nil {
-				return fmt.Errorf("failed to close consumer channel %s: %w", id, err)
+				log.Printf("Failed to close consumer channel %s: %v", id, err)
 			}
 		}
+		consumer.mu.Unlock()
 	}
+	s.consumerMu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Close the connection
-	if s.conn != nil {
-		if err := s.conn.Close(); err != nil {
-			return fmt.Errorf("failed to close connection: %w", err)
-		}
-	}
+	s.closeConnections()
 
 	return nil
 }
