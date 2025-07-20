@@ -2,8 +2,9 @@ package redis
 
 import (
 	"context"
-	"github.com/redis/go-redis/v9"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Set sets a key-value pair in Redis.
@@ -60,4 +61,27 @@ func LPush(ctx context.Context, client *redis.Client, key string, values ...inte
 // RPop pops a value from the end of a list in Redis.
 func RPop(ctx context.Context, client *redis.Client, key string) (string, error) {
 	return client.RPop(ctx, key).Result()
+}
+
+// DelMany deletes multiple keys from Redis.
+func DelMany(ctx context.Context, client *redis.Client, keys ...string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	return client.Del(ctx, keys...).Err()
+}
+
+// SetMany sets multiple key-value pairs in Redis.
+func SetMany(ctx context.Context, client *redis.Client, pairs map[string]interface{}) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+
+	// Convert map to slice of interface{} for MSet
+	args := make([]interface{}, 0, len(pairs)*2)
+	for key, value := range pairs {
+		args = append(args, key, value)
+	}
+
+	return client.MSet(ctx, args...).Err()
 }
