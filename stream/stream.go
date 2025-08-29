@@ -101,9 +101,10 @@ type StreamConfig struct {
 
 // Event represents a message event with a name and payload
 type Event struct {
-	EventName string      `json:"event_name"`
-	Payload   interface{} `json:"payload"`
-	Timestamp time.Time   `json:"timestamp"`
+	EventName string         `json:"event_name"`
+	Payload   any            `json:"payload"`
+	Timestamp time.Time      `json:"timestamp"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // NewStream creates a new Stream instance
