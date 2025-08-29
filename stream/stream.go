@@ -19,6 +19,25 @@ type StreamQueueConfig struct {
 	MaxAge         string // Maximum age of messages in the stream (e.g., "30D" for 30 days)
 }
 
+// PublishOptions holds message metadata and properties for publishing to streams
+type PublishOptions struct {
+	Headers         amqp.Table // Message headers
+	ContentType     string     // MIME content type
+	ContentEncoding string     // Content encoding
+	DeliveryMode    uint8      // 1 = non-persistent, 2 = persistent
+	Priority        uint8      // Message priority (0-9)
+	CorrelationID   string     // Correlation ID
+	ReplyTo         string     // Reply-to queue name
+	Expiration      string     // Message expiration
+	MessageID       string     // Message ID
+	Timestamp       time.Time  // Message timestamp
+	Type            string     // Message type
+	UserID          string     // User ID
+	AppID           string     // Application ID
+	Mandatory       bool       // Mandatory flag
+	Immediate       bool       // Immediate flag
+}
+
 // Stream represents the AMQP connection and channel management
 type Stream struct {
 	conn           *amqp.Connection
@@ -338,7 +357,7 @@ func (s *Stream) recreateProducers() {
 			producer.channel.Close()
 		}
 		producer.channel = channel
-		producer.notifyConfirm = channel.NotifyPublish(make(chan amqp.Confirmation, 1))
+		producer.notifyConfirm = channel.NotifyPublish(make(chan amqp.Confirmation, 10))
 		producer.active = true
 		producer.closed = false
 		producer.mu.Unlock()
@@ -461,7 +480,7 @@ func (s *Stream) NewProducer(streamName string, id ...string) (*Producer, error)
 
 	producer := &Producer{
 		channel:       channel,
-		notifyConfirm: channel.NotifyPublish(make(chan amqp.Confirmation, 1)),
+		notifyConfirm: channel.NotifyPublish(make(chan amqp.Confirmation, 10)),
 		streamName:    streamName,
 		id:            producerID,
 		active:        true,
@@ -491,8 +510,13 @@ func (p *Producer) Close() error {
 	return nil
 }
 
-// Publish sends a message directly to a stream queue
+// Publish sends a message directly to a stream queue with default options
 func (p *Producer) Publish(ctx context.Context, message []byte) error {
+	return p.PublishWithOptions(ctx, message, nil)
+}
+
+// PublishWithOptions sends a message directly to a stream queue with custom headers and properties
+func (p *Producer) PublishWithOptions(ctx context.Context, message []byte, options *PublishOptions) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -504,22 +528,68 @@ func (p *Producer) Publish(ctx context.Context, message []byte) error {
 		return errors.New("producer channel is not initialized")
 	}
 
+	// Set default publishing options
+	publishing := amqp.Publishing{
+		ContentType: "application/json",
+		Body:        message,
+	}
+
+	// Apply custom options if provided
+	// Note: RabbitMQ Streams don't support mandatory/immediate flags, so we ignore them
+	if options != nil {
+		if options.Headers != nil {
+			publishing.Headers = options.Headers
+		}
+		if options.ContentType != "" {
+			publishing.ContentType = options.ContentType
+		}
+		if options.ContentEncoding != "" {
+			publishing.ContentEncoding = options.ContentEncoding
+		}
+		// Note: DeliveryMode is ignored for streams (always persistent)
+		if options.Priority != 0 {
+			publishing.Priority = options.Priority
+		}
+		if options.CorrelationID != "" {
+			publishing.CorrelationId = options.CorrelationID
+		}
+		if options.ReplyTo != "" {
+			publishing.ReplyTo = options.ReplyTo
+		}
+		if options.Expiration != "" {
+			publishing.Expiration = options.Expiration
+		}
+		if options.MessageID != "" {
+			publishing.MessageId = options.MessageID
+		}
+		if !options.Timestamp.IsZero() {
+			publishing.Timestamp = options.Timestamp
+		}
+		if options.Type != "" {
+			publishing.Type = options.Type
+		}
+		if options.UserID != "" {
+			publishing.UserId = options.UserID
+		}
+		if options.AppID != "" {
+			publishing.AppId = options.AppID
+		}
+		// Mandatory and Immediate are not supported by streams, so we ignore them
+	}
+
 	err := p.channel.PublishWithContext(
 		ctx,
 		"",           // no exchange needed
 		p.streamName, // publish directly to stream queue
-		false,        // mandatory
-		false,        // immediate
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        message,
-		},
+		false,        // mandatory - not supported by streams
+		false,        // immediate - not supported by streams
+		publishing,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
 
-	// Wait for confirmation
+	// Wait for confirmation with timeout
 	select {
 	case confirm := <-p.notifyConfirm:
 		if !confirm.Ack {
@@ -527,13 +597,20 @@ func (p *Producer) Publish(ctx context.Context, message []byte) error {
 		}
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-time.After(5 * time.Second):
+		return errors.New("timeout waiting for publisher confirmation")
 	}
 
 	return nil
 }
 
-// PublishEvent publishes an event directly to a stream queue
+// PublishEvent publishes an event directly to a stream queue with default options
 func (p *Producer) PublishEvent(ctx context.Context, event Event) error {
+	return p.PublishEventWithOptions(ctx, event, nil)
+}
+
+// PublishEventWithOptions publishes an event directly to a stream queue with custom headers and properties
+func (p *Producer) PublishEventWithOptions(ctx context.Context, event Event, options *PublishOptions) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -556,22 +633,68 @@ func (p *Producer) PublishEvent(ctx context.Context, event Event) error {
 		return fmt.Errorf("failed to marshal event: %w", err)
 	}
 
+	// Set default publishing options
+	publishing := amqp.Publishing{
+		ContentType: "application/json",
+		Body:        message,
+	}
+
+	// Apply custom options if provided
+	// Note: RabbitMQ Streams don't support mandatory/immediate flags, so we ignore them
+	if options != nil {
+		if options.Headers != nil {
+			publishing.Headers = options.Headers
+		}
+		if options.ContentType != "" {
+			publishing.ContentType = options.ContentType
+		}
+		if options.ContentEncoding != "" {
+			publishing.ContentEncoding = options.ContentEncoding
+		}
+		// Note: DeliveryMode is ignored for streams (always persistent)
+		if options.Priority != 0 {
+			publishing.Priority = options.Priority
+		}
+		if options.CorrelationID != "" {
+			publishing.CorrelationId = options.CorrelationID
+		}
+		if options.ReplyTo != "" {
+			publishing.ReplyTo = options.ReplyTo
+		}
+		if options.Expiration != "" {
+			publishing.Expiration = options.Expiration
+		}
+		if options.MessageID != "" {
+			publishing.MessageId = options.MessageID
+		}
+		if !options.Timestamp.IsZero() {
+			publishing.Timestamp = options.Timestamp
+		}
+		if options.Type != "" {
+			publishing.Type = options.Type
+		}
+		if options.UserID != "" {
+			publishing.UserId = options.UserID
+		}
+		if options.AppID != "" {
+			publishing.AppId = options.AppID
+		}
+		// Mandatory and Immediate are not supported by streams, so we ignore them
+	}
+
 	err = p.channel.PublishWithContext(
 		ctx,
 		"",           // no exchange needed
 		p.streamName, // publish directly to stream queue
-		false,        // mandatory
-		false,        // immediate
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        message,
-		},
+		false,        // mandatory - not supported by streams
+		false,        // immediate - not supported by streams
+		publishing,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to publish event: %w", err)
 	}
 
-	// Wait for confirmation
+	// Wait for confirmation with timeout
 	select {
 	case confirm := <-p.notifyConfirm:
 		if !confirm.Ack {
@@ -579,6 +702,8 @@ func (p *Producer) PublishEvent(ctx context.Context, event Event) error {
 		}
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-time.After(5 * time.Second):
+		return errors.New("timeout waiting for publisher confirmation")
 	}
 
 	return nil

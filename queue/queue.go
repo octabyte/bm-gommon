@@ -48,6 +48,25 @@ type BindingConfig struct {
 	Args       amqp.Table
 }
 
+// PublishOptions holds message metadata and properties for publishing
+type PublishOptions struct {
+	Headers         amqp.Table // Message headers
+	ContentType     string     // MIME content type
+	ContentEncoding string     // Content encoding
+	DeliveryMode    uint8      // 1 = non-persistent, 2 = persistent
+	Priority        uint8      // Message priority (0-9)
+	CorrelationID   string     // Correlation ID
+	ReplyTo         string     // Reply-to queue name
+	Expiration      string     // Message expiration
+	MessageID       string     // Message ID
+	Timestamp       time.Time  // Message timestamp
+	Type            string     // Message type
+	UserID          string     // User ID
+	AppID           string     // Application ID
+	Mandatory       bool       // Mandatory flag
+	Immediate       bool       // Immediate flag
+}
+
 // Consumer holds consumer configuration for restart capability
 type Consumer struct {
 	QueueName string
@@ -345,8 +364,13 @@ func (e *Exchange) CreateQueue(queueConfig QueueConfig, bindingConfig BindingCon
 	return nil
 }
 
-// Publish sends a message to the exchange
+// Publish sends a message to the exchange with default options
 func (e *Exchange) Publish(ctx context.Context, routingKey string, message []byte) error {
+	return e.PublishWithOptions(ctx, routingKey, message, nil)
+}
+
+// PublishWithOptions sends a message to the exchange with custom headers and properties
+func (e *Exchange) PublishWithOptions(ctx context.Context, routingKey string, message []byte, options *PublishOptions) error {
 	if err := e.waitForConnection(); err != nil {
 		return fmt.Errorf("connection not ready: %v", err)
 	}
@@ -354,18 +378,68 @@ func (e *Exchange) Publish(ctx context.Context, routingKey string, message []byt
 	e.mutex.RLock()
 	defer e.mutex.RUnlock()
 
+	// Set default publishing options
+	publishing := amqp.Publishing{
+		ContentType:  "application/json",
+		Body:         message,
+		DeliveryMode: amqp.Persistent,
+		Timestamp:    time.Now(),
+	}
+
+	// Apply custom options if provided
+	mandatory := false
+	immediate := false
+	if options != nil {
+		if options.Headers != nil {
+			publishing.Headers = options.Headers
+		}
+		if options.ContentType != "" {
+			publishing.ContentType = options.ContentType
+		}
+		if options.ContentEncoding != "" {
+			publishing.ContentEncoding = options.ContentEncoding
+		}
+		if options.DeliveryMode != 0 {
+			publishing.DeliveryMode = options.DeliveryMode
+		}
+		if options.Priority != 0 {
+			publishing.Priority = options.Priority
+		}
+		if options.CorrelationID != "" {
+			publishing.CorrelationId = options.CorrelationID
+		}
+		if options.ReplyTo != "" {
+			publishing.ReplyTo = options.ReplyTo
+		}
+		if options.Expiration != "" {
+			publishing.Expiration = options.Expiration
+		}
+		if options.MessageID != "" {
+			publishing.MessageId = options.MessageID
+		}
+		if !options.Timestamp.IsZero() {
+			publishing.Timestamp = options.Timestamp
+		}
+		if options.Type != "" {
+			publishing.Type = options.Type
+		}
+		if options.UserID != "" {
+			publishing.UserId = options.UserID
+		}
+		if options.AppID != "" {
+			publishing.AppId = options.AppID
+		}
+		mandatory = options.Mandatory
+		immediate = options.Immediate
+	}
+
 	return e.channel.PublishWithContext(
 		ctx,
 		e.config.Name, // exchange
 		routingKey,    // routing key
-		false,         // mandatory
-		false,         // immediate
-		amqp.Publishing{
-			ContentType:  "application/json",
-			Body:         message,
-			DeliveryMode: amqp.Persistent,
-			Timestamp:    time.Now(),
-		},
+		mandatory,     // mandatory
+		immediate,     // immediate
+		publishing,
 	)
 }
 
