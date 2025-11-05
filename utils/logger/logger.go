@@ -2,7 +2,6 @@ package logger
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -20,9 +19,6 @@ func Init(cfg *Config) {
 	encoderCfg := zap.NewProductionEncoderConfig()
 	encoderCfg.TimeKey = "timestamp"
 	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
-	// Ensure level is properly encoded for Railway
-	encoderCfg.LevelKey = "level"
-	encoderCfg.EncodeLevel = zapcore.LowercaseLevelEncoder
 
 	config := zap.Config{
 		Level:             zap.NewAtomicLevelAt(getLogLevelFromString(cfg.Level)),
@@ -32,14 +28,13 @@ func Init(cfg *Config) {
 		Sampling:          nil,
 		Encoding:          "json",
 		EncoderConfig:     encoderCfg,
-		// Send ALL logs to stdout to prevent Railway from misclassifying based on stream
 		OutputPaths: []string{
 			"stdout",
 		},
 		ErrorOutputPaths: []string{
-			"stdout", // Changed from stderr to stdout
+			"stderr",
 		},
-		InitialFields: map[string]any{
+		InitialFields: map[string]interface{}{
 			"pid":     os.Getpid(),
 			"env":     cfg.Env,
 			"service": cfg.ServiceName,
@@ -48,20 +43,18 @@ func Init(cfg *Config) {
 
 	logger, err := config.Build()
 	if err != nil {
-		// Fallback to a basic logger if zap initialization fails
-		log.Printf("Failed to initialize zap logger: %v. Using basic logger.", err)
-		return
+		panic(err)
 	}
 	logger = logger.WithOptions(zap.AddCallerSkip(1))
 
-	zap.ReplaceGlobals(logger)
+	zap.ReplaceGlobals(zap.Must(logger, err))
 }
 
 func LogDebug(msg string, fields ...zap.Field) {
 	zap.L().Debug(msg, fields...)
 }
 
-func LogDebugf(msg string, args ...any) {
+func LogDebugf(msg string, args ...interface{}) {
 	if len(args) == 0 {
 		zap.L().Debug(msg)
 		return
@@ -74,7 +67,7 @@ func LogInfo(msg string, fields ...zap.Field) {
 	zap.L().Info(msg, fields...)
 }
 
-func LogInfof(msg string, args ...any) {
+func LogInfof(msg string, args ...interface{}) {
 	if len(args) == 0 {
 		zap.L().Info(msg)
 		return
@@ -87,7 +80,7 @@ func LogWarn(msg string, fields ...zap.Field) {
 	zap.L().Warn(msg, fields...)
 }
 
-func LogWarnf(msg string, args ...any) {
+func LogWarnf(msg string, args ...interface{}) {
 	if len(args) == 0 {
 		zap.L().Warn(msg)
 		return
@@ -100,7 +93,7 @@ func LogError(msg string, fields ...zap.Field) {
 	zap.L().Error(msg, fields...)
 }
 
-func LogErrorf(msg string, args ...any) {
+func LogErrorf(msg string, args ...interface{}) {
 	if len(args) == 0 {
 		zap.L().Error(msg)
 		return
@@ -113,7 +106,7 @@ func LogFatal(msg string, fields ...zap.Field) {
 	zap.L().Fatal(msg, fields...)
 }
 
-func LogFatalf(msg string, args ...any) {
+func LogFatalf(msg string, args ...interface{}) {
 	if len(args) == 0 {
 		zap.L().Fatal(msg)
 		return
@@ -126,7 +119,7 @@ func LogPanic(msg string, fields ...zap.Field) {
 	zap.L().Panic(msg, fields...)
 }
 
-func LogPanicf(msg string, args ...any) {
+func LogPanicf(msg string, args ...interface{}) {
 	if len(args) == 0 {
 		zap.L().Panic(msg)
 		return
@@ -157,12 +150,5 @@ func getLogLevelFromString(level string) zapcore.Level {
 }
 
 func Sync() {
-	if err := zap.L().Sync(); err != nil {
-		// Only log sync errors that aren't related to stdout/stderr on some systems
-		// This prevents noise from expected sync failures on stdout/stderr
-		if !strings.Contains(err.Error(), "sync /dev/stdout") &&
-			!strings.Contains(err.Error(), "sync /dev/stderr") {
-			log.Printf("Failed to sync logger: %v", err)
-		}
-	}
+	_ = zap.L().Sync()
 }
