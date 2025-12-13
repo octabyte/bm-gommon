@@ -3,3 +3,5 @@ main
 .env.testing
 /.idea
 docs
+
+*.md
