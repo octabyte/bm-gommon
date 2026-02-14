@@ -1,9 +1,10 @@
 package middleware
 
 import (
-	"github.com/labstack/echo/v4"
-	"golang.org/x/net/context"
+	"context"
 	"log"
+
+	"github.com/labstack/echo/v4"
 )
 
 func SetSessionInContext() echo.MiddlewareFunc {

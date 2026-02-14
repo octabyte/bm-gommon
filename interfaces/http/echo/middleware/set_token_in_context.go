@@ -3,9 +3,10 @@ package middleware
 import (
 	"context"
 	"errors"
-	"github.com/labstack/echo/v4"
 	"log"
 	"net/http"
+
+	"github.com/labstack/echo/v4"
 )
 
 func SetTokenInContext() echo.MiddlewareFunc {

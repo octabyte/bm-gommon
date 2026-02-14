@@ -1,14 +1,15 @@
 package middleware
 
 import (
+	"context"
 	"encoding/base64"
+	"strings"
+
 	"github.com/goccy/go-json"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/gommon/log"
 	"github.com/octabyte/bm-gommon/models"
 	"github.com/tidwall/gjson"
-	"golang.org/x/net/context"
-	"strings"
 )
 
 func SetSessionFromJWTToken() echo.MiddlewareFunc {
