@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
@@ -16,6 +17,13 @@ type Config struct {
 	Addr              string
 	Password          string
 	DB                int
+	ConnectTimeout    time.Duration     // Per-attempt timeout for initial connection checks
+	MaxRetries        int               // Native go-redis command retry count (-1 disables)
+	MinRetryBackoff   time.Duration     // Native go-redis minimum retry backoff
+	MaxRetryBackoff   time.Duration     // Native go-redis maximum retry backoff
+	RetryInitial      time.Duration     // Initial backoff for startup ping retries
+	RetryMaxInterval  time.Duration     // Maximum backoff interval for startup ping retries
+	RetryMaxElapsed   time.Duration     // Maximum total time to retry startup ping (negative disables retries)
 	EnableTracing     bool              // Enable OpenTelemetry tracing
 	EnableMetrics     bool              // Enable OpenTelemetry metrics
 	ServiceName       string            // Service name for tracing
@@ -30,6 +38,19 @@ func NewRedisClient(ctx context.Context, cfg Config) *redis.Client {
 		DB:       cfg.DB,
 	}
 
+	if cfg.ConnectTimeout > 0 {
+		options.DialTimeout = cfg.ConnectTimeout
+	}
+	if cfg.MaxRetries != 0 {
+		options.MaxRetries = cfg.MaxRetries
+	}
+	if cfg.MinRetryBackoff > 0 {
+		options.MinRetryBackoff = cfg.MinRetryBackoff
+	}
+	if cfg.MaxRetryBackoff > 0 {
+		options.MaxRetryBackoff = cfg.MaxRetryBackoff
+	}
+
 	client := redis.NewClient(options)
 
 	// Configure OpenTelemetry instrumentation if enabled
@@ -40,11 +61,90 @@ func NewRedisClient(ctx context.Context, cfg Config) *redis.Client {
 	}
 
 	// Ping the Redis server to ensure the connection is established
-	if err := client.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Failed to connect to Redis: %v", err)
+	if err := pingWithRetry(ctx, client, cfg); err != nil {
+		log.Fatalf("Failed to connect to Redis after retries: %v", err)
 	}
 
 	return client
+}
+
+// pingWithRetry retries the startup ping with exponential backoff.
+func pingWithRetry(ctx context.Context, client *redis.Client, cfg Config) error {
+	return pingWithRetryFunc(ctx, cfg, func(pingCtx context.Context) error {
+		return client.Ping(pingCtx).Err()
+	})
+}
+
+func pingWithRetryFunc(ctx context.Context, cfg Config, pingFn func(context.Context) error) error {
+	connectTimeout := cfg.ConnectTimeout
+	if connectTimeout <= 0 {
+		connectTimeout = 5 * time.Second
+	}
+
+	maxElapsed := cfg.RetryMaxElapsed
+	if maxElapsed == 0 {
+		maxElapsed = 30 * time.Second
+	}
+	if maxElapsed < 0 {
+		pingCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+		defer cancel()
+		return pingFn(pingCtx)
+	}
+
+	initialInterval := cfg.RetryInitial
+	if initialInterval <= 0 {
+		initialInterval = 500 * time.Millisecond
+	}
+
+	maxInterval := cfg.RetryMaxInterval
+	if maxInterval <= 0 {
+		maxInterval = 5 * time.Second
+	}
+
+	start := time.Now()
+	backoff := initialInterval
+	var lastErr error
+	attempt := 0
+
+	for {
+		attempt++
+		pingCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+		err := pingFn(pingCtx)
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("Redis connection established after %d attempts", attempt)
+			}
+			return nil
+		}
+		lastErr = err
+
+		elapsed := time.Since(start)
+		if elapsed >= maxElapsed {
+			return fmt.Errorf("startup ping failed after %d attempts in %s: %w", attempt, elapsed.Truncate(time.Millisecond), lastErr)
+		}
+
+		wait := backoff
+		remaining := maxElapsed - elapsed
+		if wait > remaining {
+			wait = remaining
+		}
+
+		log.Printf("Redis startup ping attempt %d failed: %v (retrying in %s)", attempt, err, wait.Truncate(time.Millisecond))
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+
+		backoff *= 2
+		if backoff > maxInterval {
+			backoff = maxInterval
+		}
+	}
 }
 
 // configureOTelInstrumentation sets up OpenTelemetry instrumentation for the Redis client
